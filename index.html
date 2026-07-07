@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+ <!DOCTYPE html>
 <html lang="en" data-theme="dark">
 <head>
 <meta charset="UTF-8">
@@ -547,6 +547,9 @@ if(FIREBASE_ENABLED){
 // (window.storage, syncs via Claude account when opened inside Claude) > IndexedDB/localStorage (this device only).
 const CLOUD_KEY='tradeedge-journal-data';
 let idbDB=null,idbOk=false,useCloud=false;
+function withTimeout(promise,ms){
+  return Promise.race([promise,new Promise((_,rej)=>setTimeout(()=>rej(new Error('timeout')),ms))]);
+}
 function initIDB(){
   return new Promise(res=>{
     useCloud=!!(typeof window!=='undefined'&&window.storage&&typeof window.storage.get==='function');
@@ -559,8 +562,8 @@ function initIDB(){
 }
 async function idbSave(data){
   if(FIREBASE_ENABLED&&fsDB&&journalPin){
-    try{await fsDB.collection('journals').doc(journalPin).set({data:JSON.stringify(data),updatedAt:Date.now()});setSaveStatus('saved');}
-    catch(e){console.error('Firestore save failed',e);}
+    try{await withTimeout(fsDB.collection('journals').doc(journalPin).set({data:JSON.stringify(data),updatedAt:Date.now()}),6000);setSaveStatus('saved');}
+    catch(e){console.error('Firestore save failed',e);showToast('⚠️ Cloud sync unavailable — saved locally instead');}
   }
   if(useCloud){
     try{await window.storage.set(CLOUD_KEY,JSON.stringify(data),false);setSaveStatus('saved');}catch(e){}
@@ -571,10 +574,10 @@ async function idbSave(data){
 async function idbLoad(){
   if(FIREBASE_ENABLED&&fsDB&&journalPin){
     try{
-      const doc=await fsDB.collection('journals').doc(journalPin).get();
+      const doc=await withTimeout(fsDB.collection('journals').doc(journalPin).get(),6000);
       if(doc.exists&&doc.data().data)return JSON.parse(doc.data().data);
       return null;
-    }catch(e){console.error('Firestore load failed',e);}
+    }catch(e){console.error('Firestore load failed',e);showToast('⚠️ Cloud sync unavailable — using local data');}
   }
   if(useCloud){
     try{const r=await window.storage.get(CLOUD_KEY,false);if(r&&r.value)return JSON.parse(r.value);return null;}
@@ -1239,11 +1242,15 @@ function initApp2(){
 async function boot(){
   if(FIREBASE_ENABLED){
     journalPin=localStorage.getItem('tej_pin')||'';
-    while(FIREBASE_ENABLED&&!journalPin){
+    let attempts=0;
+    while(FIREBASE_ENABLED&&!journalPin&&attempts<5){
+      attempts++;
       const entered=window.prompt('Set a Journal PIN (use the SAME PIN on every device to keep your data in sync):');
       if(entered&&entered.trim())journalPin=entered.trim();
+      else if(entered===null)break; // user cancelled or browser blocked further dialogs
     }
     if(journalPin)localStorage.setItem('tej_pin',journalPin);
+    else showToast('⚠️ No PIN set — using local storage only on this device');
     const pr=document.getElementById('pin-row');if(pr)pr.style.display='flex';
   }
   await initIDB();
