@@ -8,6 +8,8 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
 <style>
 :root {
   --bg:#0a0c12; --bg2:#111420; --bg3:#181c2a; --bg4:#1e2336;
@@ -399,6 +401,7 @@ textarea{min-height:70px;resize:vertical}
           <div class="sr"><div class="si"><h4>Export CSV</h4><p>All trades spreadsheet</p></div><button class="btn-secondary btn-sm" onclick="exportCSV()"><i class="ti ti-table-export"></i> Export</button></div>
           <div class="sr"><div class="si"><h4>💾 Save Backup</h4><p>JSON file — restore on any device</p></div><button class="btn-primary btn-sm" onclick="autoBackup(false)"><i class="ti ti-device-floppy"></i> Save</button></div>
           <div class="sr"><div class="si"><h4>📂 Restore Backup</h4><p>Load .json backup file</p></div><button class="btn-secondary btn-sm" onclick="document.getElementById('rfile').click()"><i class="ti ti-upload"></i> Load</button><input type="file" id="rfile" accept=".json" style="display:none" onchange="restoreBackup(this)"></div>
+          <div class="sr" id="pin-row" style="display:none"><div class="si"><h4>🔗 Journal PIN (cross-device sync)</h4><p>Use the same PIN on every device to sync</p></div><button class="btn-secondary btn-sm" onclick="changeJournalPin()"><i class="ti ti-key"></i> Change PIN</button></div>
         </div>
       </div>
     </div>
@@ -516,21 +519,67 @@ textarea{min-height:70px;resize:vertical}
 // ====== DB ======
 let db={trades:[],notes:[],strategies:{entry:[],sl:[]},settings:{startBal:10000,currency:'USD',defPair:'XAUUSD',theme:'dark',accent:'#f5a623',accent2:'#ffc04d'}};
 
-// ====== INDEXEDDB ======
-let idbDB=null,idbOk=false;
+// ====== FIREBASE (real cross-device sync) ======
+// HOW TO ENABLE:
+// 1. Go to https://console.firebase.google.com -> Add project -> give it any name -> Create.
+// 2. In the project: Build -> Firestore Database -> Create database -> "Start in test mode" -> pick a location -> Enable.
+// 3. Click the gear icon (top-left) -> Project settings -> scroll to "Your apps" -> click the </> (Web) icon.
+// 4. Register the app (any nickname) -> Firebase shows a firebaseConfig object -> copy the 6 values into the object below,
+//    replacing the "PASTE_..." placeholders. Then save this file / re-upload it to GitHub.
+// 5. On each device, the app will ask you once for a "Journal PIN" — use the EXACT SAME PIN on every device
+//    you want synced together. It is stored only in that browser and used as your private document key in Firestore.
+const firebaseConfig={
+  apiKey:"AIzaSyASshoQMd2PWUJbCEYMbOa_Co8soKo9Voc",
+  authDomain:"my-trading-journal-86991.firebaseapp.com",
+  projectId:"my-trading-journal-86991",
+  storageBucket:"my-trading-journal-86991.firebasestorage.app",
+  messagingSenderId:"150607090286",
+  appId:"1:150607090286:web:14e645b7816823f9c24c7f"
+};
+const FIREBASE_ENABLED=firebaseConfig.apiKey&&firebaseConfig.apiKey.indexOf('PASTE_')!==0;
+let fsDB=null,journalPin=null;
+if(FIREBASE_ENABLED){
+  try{firebase.initializeApp(firebaseConfig);fsDB=firebase.firestore();}catch(e){console.error('Firebase init failed',e);}
+}
+
+// ====== STORAGE ======
+// Priority: Firestore (real cross-device sync, needs firebaseConfig above) > Claude artifact storage
+// (window.storage, syncs via Claude account when opened inside Claude) > IndexedDB/localStorage (this device only).
+const CLOUD_KEY='tradeedge-journal-data';
+let idbDB=null,idbOk=false,useCloud=false;
 function initIDB(){
   return new Promise(res=>{
+    useCloud=!!(typeof window!=='undefined'&&window.storage&&typeof window.storage.get==='function');
+    if(useCloud||FIREBASE_ENABLED){res(true);return;}
     const req=indexedDB.open('TradeEdgeDB',1);
     req.onupgradeneeded=e=>e.target.result.createObjectStore('appdata');
     req.onsuccess=e=>{idbDB=e.target.result;idbOk=true;res(true)};
     req.onerror=()=>res(false);
   });
 }
-function idbSave(data){
+async function idbSave(data){
+  if(FIREBASE_ENABLED&&fsDB&&journalPin){
+    try{await fsDB.collection('journals').doc(journalPin).set({data:JSON.stringify(data),updatedAt:Date.now()});setSaveStatus('saved');}
+    catch(e){console.error('Firestore save failed',e);}
+  }
+  if(useCloud){
+    try{await window.storage.set(CLOUD_KEY,JSON.stringify(data),false);setSaveStatus('saved');}catch(e){}
+  }
   if(idbOk&&idbDB){const tx=idbDB.transaction('appdata','readwrite');tx.objectStore('appdata').put(data,'main');}
   try{localStorage.setItem('bte_v1',JSON.stringify(data));}catch(e){}
 }
-function idbLoad(){
+async function idbLoad(){
+  if(FIREBASE_ENABLED&&fsDB&&journalPin){
+    try{
+      const doc=await fsDB.collection('journals').doc(journalPin).get();
+      if(doc.exists&&doc.data().data)return JSON.parse(doc.data().data);
+      return null;
+    }catch(e){console.error('Firestore load failed',e);}
+  }
+  if(useCloud){
+    try{const r=await window.storage.get(CLOUD_KEY,false);if(r&&r.value)return JSON.parse(r.value);return null;}
+    catch(e){return null;}
+  }
   return new Promise(res=>{
     if(!idbOk||!idbDB){const s=localStorage.getItem('bte_v1');res(s?JSON.parse(s):null);return;}
     const tx=idbDB.transaction('appdata','readonly');
@@ -545,7 +594,8 @@ function idbLoad(){
 function save(){idbSave(db);setSaveStatus('saved');}
 function setSaveStatus(st){
   const el=document.getElementById('sstatus');if(!el)return;
-  if(st==='saved'){el.innerHTML='<i class="ti ti-cloud-check" style="color:var(--green)"></i><span style="color:var(--green)">Saved</span>';clearTimeout(el._t);el._t=setTimeout(()=>{el.innerHTML='<i class="ti ti-cloud" style="color:var(--text3)"></i><span style="color:var(--text3)">Auto-saved</span>';},2500);}
+  const label=FIREBASE_ENABLED?'Synced':(useCloud?'Synced':'Saved');
+  if(st==='saved'){el.innerHTML=`<i class="ti ti-cloud-check" style="color:var(--green)"></i><span style="color:var(--green)">${label}</span>`;clearTimeout(el._t);el._t=setTimeout(()=>{el.innerHTML='<i class="ti ti-cloud" style="color:var(--text3)"></i><span style="color:var(--text3)">Auto-saved</span>';},2500);}
 }
 let backupCount=0;
 function triggerBackup(){backupCount++;if(backupCount>=10){backupCount=0;autoBackup(true);}}
@@ -1187,12 +1237,30 @@ function initApp2(){
   renderDash();setSaveStatus('saved');
 }
 async function boot(){
+  if(FIREBASE_ENABLED){
+    journalPin=localStorage.getItem('tej_pin')||'';
+    while(FIREBASE_ENABLED&&!journalPin){
+      const entered=window.prompt('Set a Journal PIN (use the SAME PIN on every device to keep your data in sync):');
+      if(entered&&entered.trim())journalPin=entered.trim();
+    }
+    if(journalPin)localStorage.setItem('tej_pin',journalPin);
+    const pr=document.getElementById('pin-row');if(pr)pr.style.display='flex';
+  }
   await initIDB();
   const saved=await idbLoad();
   if(saved){try{db=saved;}catch(e){}}
   seed();
   initApp2();
   if(db.trades.length===0)setTimeout(()=>document.getElementById('restore-modal').classList.add('open'),800);
+}
+function changeJournalPin(){
+  const entered=window.prompt('Enter the Journal PIN to sync to (use the same PIN across devices):',journalPin||'');
+  if(entered&&entered.trim()){
+    journalPin=entered.trim();
+    localStorage.setItem('tej_pin',journalPin);
+    showToast('PIN updated — reloading...');
+    setTimeout(()=>location.reload(),800);
+  }
 }
 boot();
 </script>
