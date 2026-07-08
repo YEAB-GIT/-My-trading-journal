@@ -401,7 +401,7 @@ textarea{min-height:70px;resize:vertical}
           <div class="sr"><div class="si"><h4>Export CSV</h4><p>All trades spreadsheet</p></div><button class="btn-secondary btn-sm" onclick="exportCSV()"><i class="ti ti-table-export"></i> Export</button></div>
           <div class="sr"><div class="si"><h4>💾 Save Backup</h4><p>JSON file — restore on any device</p></div><button class="btn-primary btn-sm" onclick="autoBackup(false)"><i class="ti ti-device-floppy"></i> Save</button></div>
           <div class="sr"><div class="si"><h4>📂 Restore Backup</h4><p>Load .json backup file</p></div><button class="btn-secondary btn-sm" onclick="document.getElementById('rfile').click()"><i class="ti ti-upload"></i> Load</button><input type="file" id="rfile" accept=".json" style="display:none" onchange="restoreBackup(this)"></div>
-          <div class="sr" id="pin-row" style="display:none"><div class="si"><h4>🔗 Journal PIN (cross-device sync)</h4><p>Use the same PIN on every device to sync</p></div><button class="btn-secondary btn-sm" onclick="changeJournalPin()"><i class="ti ti-key"></i> Change PIN</button></div>
+          <div class="sr" id="pin-row" style="display:none"><div class="si"><h4>🔗 Journal PIN (cross-device sync)</h4><p>Current PIN: <strong id="pin-display" style="color:var(--accent);user-select:all">—</strong></p></div><div style="display:flex;gap:8px"><button class="btn-secondary btn-sm" onclick="copyPin()"><i class="ti ti-copy"></i> Copy</button><button class="btn-secondary btn-sm" onclick="changeJournalPin()"><i class="ti ti-key"></i> Change</button></div></div>
         </div>
       </div>
     </div>
@@ -494,6 +494,20 @@ textarea{min-height:70px;resize:vertical}
     <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:18px;padding-top:14px;border-top:1px solid var(--border)">
       <button class="btn-secondary" onclick="closeM('export-modal')">Cancel</button>
       <button class="btn-primary" onclick="runExportPDF()"><i class="ti ti-file-download"></i> Export PDF</button>
+    </div>
+  </div>
+</div>
+
+<!-- PIN MODAL -->
+<div class="mo" id="pin-modal">
+  <div class="modal" style="max-width:420px;text-align:center">
+    <div style="font-size:36px;margin-bottom:10px">🔗</div>
+    <div class="mt" style="margin-bottom:8px">Set Your Journal PIN</div>
+    <p style="color:var(--text2);font-size:13px;line-height:1.7;margin-bottom:16px">Use the <strong>exact same PIN on every device</strong> (phone, laptop) to keep your data synced together.</p>
+    <input type="text" id="pin-input" placeholder="e.g. myjournal2026" style="width:100%;padding:12px 14px;border-radius:var(--r);border:1px solid var(--border);background:var(--surface2);color:var(--text);font-size:15px;text-align:center;margin-bottom:12px" autocapitalize="off" autocorrect="off">
+    <div style="display:flex;flex-direction:column;gap:9px">
+      <button class="btn-primary" id="pin-submit"><i class="ti ti-check"></i> Save &amp; Sync</button>
+      <button class="btn-secondary" id="pin-skip">Skip — use this device only</button>
     </div>
   </div>
 </div>
@@ -1239,19 +1253,34 @@ function initApp2(){
   if(db.settings?.accent){document.documentElement.style.setProperty('--accent',db.settings.accent);document.documentElement.style.setProperty('--accent2',db.settings.accent2||db.settings.accent);document.documentElement.style.setProperty('--accent-dim',db.settings.accent+'22');}
   renderDash();setSaveStatus('saved');
 }
+function askPinModal(){
+  return new Promise(resolve=>{
+    const modal=document.getElementById('pin-modal');
+    const input=document.getElementById('pin-input');
+    input.value='';
+    modal.classList.add('open');
+    setTimeout(()=>input.focus(),200);
+    const submit=document.getElementById('pin-submit');
+    const skip=document.getElementById('pin-skip');
+    const onSubmit=()=>{const v=input.value.trim();if(!v){input.focus();return;}cleanup();modal.classList.remove('open');resolve(v);};
+    const onSkip=()=>{cleanup();modal.classList.remove('open');resolve('');};
+    const onKey=(e)=>{if(e.key==='Enter')onSubmit();};
+    function cleanup(){submit.removeEventListener('click',onSubmit);skip.removeEventListener('click',onSkip);input.removeEventListener('keydown',onKey);}
+    submit.addEventListener('click',onSubmit);
+    skip.addEventListener('click',onSkip);
+    input.addEventListener('keydown',onKey);
+  });
+}
 async function boot(){
   if(FIREBASE_ENABLED){
     journalPin=localStorage.getItem('tej_pin')||'';
-    let attempts=0;
-    while(FIREBASE_ENABLED&&!journalPin&&attempts<5){
-      attempts++;
-      const entered=window.prompt('Set a Journal PIN (use the SAME PIN on every device to keep your data in sync):');
-      if(entered&&entered.trim())journalPin=entered.trim();
-      else if(entered===null)break; // user cancelled or browser blocked further dialogs
+    if(!journalPin){
+      journalPin=await askPinModal();
     }
     if(journalPin)localStorage.setItem('tej_pin',journalPin);
     else showToast('⚠️ No PIN set — using local storage only on this device');
     const pr=document.getElementById('pin-row');if(pr)pr.style.display='flex';
+    const pd=document.getElementById('pin-display');if(pd)pd.textContent=journalPin||'(none — local only)';
   }
   await initIDB();
   const saved=await idbLoad();
@@ -1260,14 +1289,20 @@ async function boot(){
   initApp2();
   if(db.trades.length===0)setTimeout(()=>document.getElementById('restore-modal').classList.add('open'),800);
 }
-function changeJournalPin(){
-  const entered=window.prompt('Enter the Journal PIN to sync to (use the same PIN across devices):',journalPin||'');
-  if(entered&&entered.trim()){
-    journalPin=entered.trim();
+async function changeJournalPin(){
+  const entered=await askPinModal();
+  if(entered){
+    journalPin=entered;
     localStorage.setItem('tej_pin',journalPin);
     showToast('PIN updated — reloading...');
     setTimeout(()=>location.reload(),800);
   }
+}
+function copyPin(){
+  if(!journalPin){showToast('No PIN set on this device');return;}
+  navigator.clipboard?.writeText(journalPin).then(()=>showToast('📋 PIN copied — paste it on your other device')).catch(()=>{
+    const ta=document.createElement('textarea');ta.value=journalPin;document.body.appendChild(ta);ta.select();document.execCommand('copy');document.body.removeChild(ta);showToast('📋 PIN copied');
+  });
 }
 boot();
 </script>
